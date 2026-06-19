@@ -42,6 +42,14 @@ export async function PUT(request: Request, context: any) {
 
     // ── KHI BÁO GIÁ ĐƯỢC CHẤP NHẬN ──
     if (status === 'accepted') {
+      // Kiểm tra status cũ — nếu đã accepted rồi thì không xử lý lại
+      const current = await prisma.$queryRawUnsafe(`
+        SELECT status FROM quotations WHERE id = $1
+      `, parseInt(id)) as any[];
+      if (current[0]?.status === 'accepted') {
+        return NextResponse.json({ success: true });
+      }
+
       const quotation = await prisma.$queryRawUnsafe(`
         SELECT q.*, c.name as customer_name
         FROM quotations q
