@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id                 Int                  @id @default(autoincrement())
+  name               String
+  company            String               @default("Chưa cập nhật")
+  phone              String               @default("Chưa cập nhật")
+  email              String               @default("Chưa cập nhật")
+  value              String               @default("0 đ")
+  status             String               @default("Tiếp cận")
+  createdAt          DateTime             @default(now())
+  assigned_to        String?              @db.Uuid
+  credit_limit       Decimal?             @default(0) @db.Decimal
+  tier               String?              @default("normal")
+  tier_note          String?
+  interactions       Interaction[]
+  tasks              Task[]
+  customer_orders    customer_orders[]
+  debts              debts[]
+  order_history_logs order_history_logs[]
+  quotations         quotations[]
+}
+
+model Interaction {
+  id         Int      @id @default(autoincrement())
+  customerId Int
+  content    String
+  noteType   String   @default("Gọi điện")
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+}
+
+model Task {
+  id          Int      @id @default(autoincrement())
+  customerId  Int
+  title       String
+  dueDate     String
+  isCompleted Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+}
+
+model customer_orders {
+  id           Int       @id @default(autoincrement())
+  customer_id  Int?
+  product_name String    @db.VarChar(255)
+  quantity     Decimal   @db.Decimal
+  unit_price   Decimal   @db.Decimal
+  total_price  Decimal   @db.Decimal
+  updated_at   DateTime? @default(now()) @db.Timestamp(6)
+  Customer     Customer? @relation(fields: [customer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model order_history_logs {
+  id             Int       @id @default(autoincrement())
+  customer_id    Int?
+  change_summary String
+  updated_by     String?   @default("Nhân viên") @db.VarChar(100)
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  Customer       Customer? @relation(fields: [customer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model staff_profiles {
+  id         String    @id @db.Uuid
+  full_name  String?
+  role       String?   @default("staff")
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+model debt_payments {
+  id         Int       @id @default(autoincrement())
+  debt_id    Int?
+  amount     Decimal   @db.Decimal
+  paid_at    DateTime  @db.Date
+  note       String?
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  debts      debts?    @relation(fields: [debt_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model debts {
+  id            Int             @id @default(autoincrement())
+  customer_id   Int?
+  quotation_id  Int?
+  title         String
+  total_amount  Decimal         @db.Decimal
+  paid_amount   Decimal?        @default(0) @db.Decimal
+  due_date      DateTime        @db.Date
+  status        String?         @default("unpaid")
+  note          String?
+  created_by    String?
+  created_at    DateTime?       @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime?       @default(now()) @db.Timestamptz(6)
+  due_date_note String?
+  debt_payments debt_payments[]
+  Customer      Customer?       @relation(fields: [customer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  quotations    quotations?     @relation(fields: [quotation_id], references: [id], onUpdate: NoAction)
+}
+
+model quotation_items {
+  id           Int         @id @default(autoincrement())
+  quotation_id Int?
+  product_name String
+  unit         String?     @default("Tấn")
+  quantity     Decimal     @db.Decimal
+  unit_price   Decimal     @db.Decimal
+  total_price  Decimal?    @db.Decimal
+  note         String?
+  quotations   quotations? @relation(fields: [quotation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model quotations {
+  id              Int               @id @default(autoincrement())
+  customer_id     Int?
+  quote_number    String            @unique
+  status          String?           @default("draft")
+  valid_days      Int?              @default(7)
+  note            String?
+  total_value     Decimal?          @default(0) @db.Decimal
+  created_by      String?
+  created_at      DateTime?         @default(now()) @db.Timestamptz(6)
+  sent_at         DateTime?         @db.Timestamptz(6)
+  updated_at      DateTime?         @default(now()) @db.Timestamptz(6)
+  debts           debts[]
+  quotation_items quotation_items[]
+  Customer        Customer?         @relation(fields: [customer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model steel_prices {
+  id           Int       @id @default(autoincrement())
+  product_name String
+  unit         String?   @default("Tấn")
+  price        Decimal   @db.Decimal
+  note         String?
+  updated_at   DateTime? @default(now()) @db.Timestamptz(6)
+}

@@ -1,0 +1,208 @@
+export const dynamic = 'force-dynamic';
+
+import { NextResponse } from 'next/server';
+import { getCurrentUser } from '@/lib/auth/getUser';
+import { prisma } from '@/lib/prisma';
+
+// Hàm tính khuyến nghị tự động
+function calcRecommendation(stats: {
+  totalDebts: number;
+  overdueDebts: number;
+  paidOnTime: number;
+  totalPaid: number;
+  remainingValue: number;
+  creditLimit: number;
+  daysSinceLastContact: number;
+  currentTier: string;
+}): { recommendation: string; suggestedTier: string | null; reasons: string[] } {
+  const reasons: string[] = [];
+  let suggestedTier: string | null = null;
+
+  // Cảnh báo quá hạn
+  if (stats.overdueDebts > 0) {
+    reasons.push(`⚠️ Có ${stats.overdueDebts} khoản nợ quá hạn — cần đôn đốc thanh toán`);
+    suggestedTier = 'caution';
+  }
+
+  // Vượt giới hạn công nợ
+  if (stats.creditLimit > 0 && stats.remainingValue > stats.creditLimit) {
+    reasons.push(`🚨 Công nợ vượt giới hạn — tạm dừng cung cấp hàng hoá`);
+    suggestedTier = 'caution';
+  }
+
+  // Thanh toán tốt → gợi ý nâng hạng
+  if (stats.paidOnTime >= 3 && stats.overdueDebts === 0 && stats.totalPaid > 0) {
+    reasons.push(`✅ Đã thanh toán đúng hạn ${stats.paidOnTime} lần — khách hàng uy tín`);
+    if (stats.currentTier === 'normal') suggestedTier = 'priority';
+    if (stats.currentTier === 'priority') suggestedTier = 'vip';
+  }
+
+  // Doanh số cao
+  if (stats.totalPaid >= 500_000_000) {
+    reasons.push(`💰 Tổng doanh số trên 500 triệu — xem xét nâng VIP`);
+    if (!suggestedTier || suggestedTier === 'priority') suggestedTier = 'vip';
+  }
+
+  // Lâu không liên hệ
+  if (stats.daysSinceLastContact > 30) {
+    reasons.push(`📅 Chưa liên hệ ${stats.daysSinceLastContact} ngày — cần chủ động chăm sóc`);
+  } else if (stats.daysSinceLastContact > 14) {
+    reasons.push(`📅 Chưa liên hệ ${stats.daysSinceLastContact} ngày — nên liên hệ sớm`);
+  }
+
+  // Không có giao dịch
+  if (stats.totalDebts === 0) {
+    reasons.push(`💡 Chưa có đơn hàng — cần tư vấn và chào hàng`);
+  }
+
+  const recommendation = reasons.length === 0
+    ? '✨ Khách hàng ổn định, duy trì chăm sóc định kỳ'
+    : reasons.join('\n');
+
+  return { recommendation, suggestedTier, reasons };
+}
+
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const user = await getCurrentUser(request);
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const resolvedParams = await context.params;
+    const customerId = parseInt(resolvedParams.id, 10);
+    if (isNaN(customerId)) return NextResponse.json({ error: 'ID không hợp lệ' }, { status: 400 });
+
+    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) return NextResponse.json({ error: 'Không tìm thấy' }, { status: 404 });
+
+    if (user.role !== 'admin' && customer.assigned_to !== user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+
+    // Thống kê công nợ
+    const debtStats = await prisma.$queryRawUnsafe(`
+      SELECT
+        COUNT(*) as total_debts,
+        COUNT(CASE WHEN status = 'overdue' THEN 1 END) as overdue_debts,
+        COALESCE(SUM(total_amount), 0) as completed_value,
+        COALESCE(SUM(paid_amount), 0) as paid_value,
+        COALESCE(SUM(total_amount - paid_amount), 0) as remaining_value
+      FROM debts WHERE customer_id = $1
+    `, customerId) as any[];
+
+    // Số lần thanh toán đúng hạn
+    const onTimePayments = await prisma.$queryRawUnsafe(`
+      SELECT COUNT(DISTINCT d.id) as count
+      FROM debts d
+      WHERE d.customer_id = $1
+        AND d.status = 'paid'
+        AND d.paid_amount >= d.total_amount
+    `, customerId) as any[];
+
+    // Ngày liên hệ gần nhất
+    const lastContact = await prisma.$queryRawUnsafe(`
+      SELECT MAX(created_at) as last_date
+      FROM interactions WHERE customer_id = $1
+    `, customerId) as any[];
+
+    const ds = debtStats[0];
+    const remainingValue = parseFloat(ds.remaining_value) || 0;
+    const creditLimit = parseFloat(String((customer as any).credit_limit || 0));
+    const creditWarning = creditLimit > 0 && remainingValue > creditLimit;
+    const creditUsedPct = creditLimit > 0 ? Math.round((remainingValue / creditLimit) * 100) : 0;
+
+    const lastDate = lastContact[0]?.last_date;
+    const daysSinceLastContact = lastDate
+      ? Math.floor((Date.now() - new Date(lastDate).getTime()) / 86400000)
+      : 999;
+
+    const { recommendation, suggestedTier, reasons } = calcRecommendation({
+      totalDebts: parseInt(ds.total_debts) || 0,
+      overdueDebts: parseInt(ds.overdue_debts) || 0,
+      paidOnTime: parseInt(onTimePayments[0]?.count) || 0,
+      totalPaid: parseFloat(ds.paid_value) || 0,
+      remainingValue,
+      creditLimit,
+      daysSinceLastContact,
+      currentTier: (customer as any).tier || 'normal',
+    });
+
+    return NextResponse.json({
+      ...customer,
+      completed_value: String(ds.completed_value),
+      paid_value: String(ds.paid_value),
+      remaining_value: String(remainingValue),
+      credit_warning: creditWarning,
+      credit_used_pct: creditUsedPct,
+      recommendation,
+      suggested_tier: suggestedTier,
+      reasons,
+      days_since_last_contact: daysSinceLastContact,
+    });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+export async function PUT(
+  request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const user = await getCurrentUser(request);
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    const resolvedParams = await context.params;
+    const customerId = parseInt(resolvedParams.id, 10);
+    if (isNaN(customerId)) return NextResponse.json({ error: 'ID không hợp lệ' }, { status: 400 });
+
+    const body = await request.json();
+    const { status, name, company, phone, email, value, credit_limit, tier, tier_note } = body;
+
+    const updateData: any = {};
+    if (status       !== undefined) updateData.status       = status.trim();
+    if (name         !== undefined) updateData.name         = name.trim();
+    if (company      !== undefined) updateData.company      = company.trim();
+    if (phone        !== undefined) updateData.phone        = phone.trim();
+    if (email        !== undefined) updateData.email        = email.trim();
+    if (value        !== undefined) updateData.value        = value.trim();
+    if (credit_limit !== undefined) updateData.credit_limit = parseFloat(credit_limit) || 0;
+    if (tier         !== undefined) updateData.tier         = tier;
+    if (tier_note    !== undefined) updateData.tier_note    = tier_note;
+
+    if (Object.keys(updateData).length === 0) {
+      return NextResponse.json({ error: 'Không có thông tin cần cập nhật' }, { status: 400 });
+    }
+
+    const updatedCustomer = await prisma.customer.update({
+      where: { id: customerId },
+      data: updateData,
+    });
+
+    const debtStats = await prisma.$queryRawUnsafe(`
+      SELECT
+        COALESCE(SUM(total_amount), 0) as completed_value,
+        COALESCE(SUM(paid_amount), 0) as paid_value,
+        COALESCE(SUM(total_amount - paid_amount), 0) as remaining_value
+      FROM debts WHERE customer_id = $1
+    `, customerId) as any[];
+
+    const ds = debtStats[0];
+    const remainingValue = parseFloat(ds.remaining_value) || 0;
+    const creditLimitNew = parseFloat(String((updatedCustomer as any).credit_limit || 0));
+
+    return NextResponse.json({
+      ...updatedCustomer,
+      completed_value: String(ds.completed_value),
+      paid_value: String(ds.paid_value),
+      remaining_value: String(remainingValue),
+      credit_warning: creditLimitNew > 0 && remainingValue > creditLimitNew,
+      credit_used_pct: creditLimitNew > 0 ? Math.round((remainingValue / creditLimitNew) * 100) : 0,
+    });
+  } catch (error: any) {
+    console.error('CUSTOMER GET ERROR:', error.message); // ← thêm dòng này
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
